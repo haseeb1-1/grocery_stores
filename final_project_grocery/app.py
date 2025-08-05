@@ -3,7 +3,7 @@ import sqlite3
 import os
 from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
-import hashlib  # Added for password hashing
+import hashlib
 
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'
@@ -19,18 +19,16 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024  # 2MB limit
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def hash_password(password):
-    """Hash password using SHA-256"""
     return hashlib.sha256(password.encode()).hexdigest()
 
 def init_db():
     with sqlite3.connect(DATABASE) as con:
         cur = con.cursor()
         
-        # Users table with phone column (FIXED)
+        # Users table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,17 +37,15 @@ def init_db():
             phone TEXT DEFAULT '',
             address TEXT DEFAULT '',
             is_admin BOOLEAN DEFAULT 0
-        )
-        """)
+        )""")
         
-        # Admins table (ADDED)
+        # Admins table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS admins (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL
-        )
-        """)
+        )""")
         
         # Products table
         cur.execute('''CREATE TABLE IF NOT EXISTS products (
@@ -62,7 +58,7 @@ def init_db():
                         stock INTEGER DEFAULT 100
                     )''')
         
-        # Orders table with phone column (FIXED)
+        # Orders table
         cur.execute('''CREATE TABLE IF NOT EXISTS orders (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         username TEXT,
@@ -88,7 +84,7 @@ def init_db():
                         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )''')
         
-        # Insert default admin with hashed password
+        # Insert default admin
         try:
             hashed_password = hash_password("admin123")
             cur.execute("INSERT OR IGNORE INTO admins (username, password) VALUES (?, ?)", 
@@ -132,6 +128,14 @@ def login():
                 session['is_admin'] = False
                 return redirect('/products')
             
+            # Check in admins table
+            admin = con.execute("SELECT * FROM admins WHERE username=? AND password=?", 
+                              (uname, hashed_pwd)).fetchone()
+            if admin:
+                session['admin'] = uname
+                session['is_admin'] = True
+                return redirect('/admin_dashboard')
+            
             flash("Invalid credentials", 'error')
             return redirect('/login')
     return render_template('login.html')
@@ -142,13 +146,6 @@ def products():
         return redirect('/login')
 
     with sqlite3.connect(DATABASE) as con:
-        # Add stock column if missing (no error if already exists)
-        try:
-            con.execute("ALTER TABLE products ADD COLUMN stock INTEGER DEFAULT 10")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-
-        # Now query will work!
         products = con.execute("SELECT * FROM products WHERE stock > 0").fetchall()
         cart_count = con.execute("SELECT COUNT(*) FROM cart WHERE username=?", 
                                (session['user'],)).fetchone()[0]
@@ -174,14 +171,12 @@ def add_to_cart(product_id):
         return redirect('/login')
     
     with sqlite3.connect(DATABASE) as con:
-        # Check product stock
         stock = con.execute("SELECT stock FROM products WHERE id=?", 
                            (product_id,)).fetchone()
         if not stock or stock[0] <= 0:
             flash("Product out of stock", 'error')
             return redirect('/products')
         
-        # Add to cart
         existing = con.execute("SELECT * FROM cart WHERE username=? AND product_id=?", 
                              (session['user'], product_id)).fetchone()
         if existing:
@@ -209,7 +204,6 @@ def update_cart(product_id, action):
         
         new_quantity = item[0]
         if action == 'increase':
-            # Check stock before increasing
             stock = con.execute("SELECT stock FROM products WHERE id=?", 
                               (product_id,)).fetchone()[0]
             if new_quantity >= stock:
@@ -221,7 +215,6 @@ def update_cart(product_id, action):
         con.execute("UPDATE cart SET quantity=? WHERE username=? AND product_id=?", 
                    (new_quantity, session['user'], product_id))
         
-        # Get updated cart data
         cart_items = con.execute('''SELECT p.id, p.name, p.price, c.quantity 
                                   FROM products p JOIN cart c ON p.id = c.product_id 
                                   WHERE c.username=?''', (session['user'],)).fetchall()
@@ -235,7 +228,7 @@ def update_cart(product_id, action):
         'newQuantity': new_quantity,
         'cartTotal': cart_total,
         'cartCount': cart_count,
-        'grandTotal': cart_total + 30  # Including delivery charge
+        'grandTotal': cart_total + 30
     })
 
 @app.route('/remove_from_cart/<int:product_id>')
@@ -269,6 +262,88 @@ def view_cart():
                          delivery_charge=30,
                          cart_count=cart_count)
 
+@app.route('/checkout', methods=['GET', 'POST'])
+def checkout():
+    if 'user' not in session:
+        return redirect('/login')
+
+    if request.method == 'GET':
+        with sqlite3.connect(DATABASE) as con:
+            user = con.execute("SELECT address, phone FROM users WHERE username=?", 
+                             (session['user'],)).fetchone()
+            cart_items = con.execute('''SELECT p.id, p.name, p.price, c.quantity, p.stock
+                                      FROM products p JOIN cart c ON p.id = c.product_id
+                                      WHERE c.username=?''', (session['user'],)).fetchall()
+            
+            if not cart_items:
+                flash("Your cart is empty", 'error')
+                return redirect('/products')
+            
+            total = sum(item[2] * item[3] for item in cart_items)
+            delivery_charge = 30
+            grand_total = total + delivery_charge
+            
+            out_of_stock = any(item[3] > item[4] for item in cart_items)
+            if out_of_stock:
+                flash("Some items in your cart are out of stock", 'error')
+                return redirect('/view_cart')
+            
+        return render_template('checkout.html',
+                            user=user,
+                            cart_items=cart_items,
+                            total=total,
+                            delivery_charge=delivery_charge,
+                            grand_total=grand_total)
+    
+    elif request.method == 'POST':
+        address = request.form.get('address', '').strip()
+        phone = request.form.get('phone', '').strip()
+        payment_method = request.form.get('payment_method', 'COD').strip()
+        
+        if not address or not phone:
+            flash("Address and phone number are required", 'error')
+            return redirect('/checkout')
+        
+        with sqlite3.connect(DATABASE) as con:
+            try:
+                cart_items = con.execute('''SELECT p.id, p.name, p.price, c.quantity, p.stock
+                                          FROM products p JOIN cart c ON p.id = c.product_id
+                                          WHERE c.username=?''', (session['user'],)).fetchall()
+                
+                if not cart_items:
+                    flash("Your cart is empty", 'error')
+                    return redirect('/products')
+                
+                delivery_time = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+                
+                for item in cart_items:
+                    product_id, name, price, quantity, stock = item
+                    
+                    if quantity > stock:
+                        flash(f"Not enough stock for {name}", 'error')
+                        return redirect('/view_cart')
+                    
+                    con.execute('''INSERT INTO orders 
+                                 (username, product_id, product_name, price, quantity,
+                                  address, phone, payment_method, delivery_time)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                              (session['user'], product_id, name, price, quantity,
+                               address, phone, payment_method, delivery_time))
+                    
+                    con.execute("UPDATE products SET stock = stock - ? WHERE id = ?",
+                              (quantity, product_id))
+                
+                con.execute("DELETE FROM cart WHERE username = ?", (session['user'],))
+                con.commit()
+                
+                flash("Order placed successfully!", 'success')
+                return redirect('/orders')
+            
+            except Exception as e:
+                con.rollback()
+                flash(f"Error processing order: {str(e)}", 'error')
+                return redirect('/checkout')
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -285,16 +360,8 @@ def register():
         
         with sqlite3.connect(DATABASE) as con:
             try:
-                # Ensure phone column exists
-                try:
-                    con.execute("ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''")
-                except sqlite3.OperationalError:
-                    pass  # Ignore if column already exists
-                
-                con.execute(
-                    "INSERT INTO users (username, password, address, phone) VALUES (?, ?, ?, ?)",
-                    (username, hashed_password, address, phone)
-                )
+                con.execute("INSERT INTO users (username, password, address, phone) VALUES (?, ?, ?, ?)",
+                    (username, hashed_password, address, phone))
                 con.commit()
                 session['user'] = username
                 flash('Registration successful!', 'success')
@@ -319,7 +386,6 @@ def user_orders():
                             (session['user'],)).fetchall()
     return render_template('user_orders.html', orders=orders)
 
-# Admin routes
 @app.route('/admin_dashboard')
 def admin_dashboard():
     if 'admin' not in session:
@@ -328,24 +394,51 @@ def admin_dashboard():
     
     try:
         with sqlite3.connect(DATABASE) as con:
-            # Get products with pagination (example: last 50)
-            products = con.execute("""
+            # Get products with proper type conversion
+            products = []
+            raw_products = con.execute("""
                 SELECT id, name, price, stock 
                 FROM products 
                 ORDER BY id DESC 
                 LIMIT 50
             """).fetchall()
             
-            # Get recent orders with status information
-            orders = con.execute("""
+            for product in raw_products:
+                products.append((
+                    product[0],
+                    product[1],
+                    float(product[2]) if product[2] is not None else 0.0,
+                    product[3]
+                ))
+            
+            # Get recent orders with proper type conversion
+            orders = []
+            raw_orders = con.execute("""
                 SELECT o.id, o.username, o.product_name, o.price, o.quantity,
-                       o.status, o.order_date, o.delivery_time
+                       o.address, o.phone, o.payment_method, o.delivery_charge,
+                       o.delivery_time, o.order_date, o.status
                 FROM orders o
                 ORDER BY o.order_date DESC 
                 LIMIT 50
             """).fetchall()
             
-            # Get statistics in a single query for better performance
+            for order in raw_orders:
+                orders.append((
+                    order[0],  # id
+                    order[1],  # username
+                    order[2],  # product_name
+                    float(order[3]) if order[3] is not None else 0.0,  # price
+                    order[4],  # quantity
+                    order[5],  # address
+                    order[6],  # phone
+                    order[7],  # payment_method
+                    float(order[8]) if order[8] is not None else 0.0,  # delivery_charge
+                    order[9],  # delivery_time
+                    order[10],  # order_date
+                    order[11]   # status
+                ))
+            
+            # Get statistics
             stats = con.execute("""
                 SELECT 
                     (SELECT COUNT(*) FROM products) as total_products,
@@ -354,12 +447,11 @@ def admin_dashboard():
                     (SELECT COUNT(*) FROM users WHERE is_admin = 1) as total_admins
             """).fetchone()
             
-            # Convert stats tuple to named dictionary for easier template access
             stats = {
-                'total_products': stats[0],
-                'total_orders': stats[1],
-                'total_users': stats[2],
-                'total_admins': stats[3]
+                'total_products': int(stats[0]) if stats[0] is not None else 0,
+                'total_orders': int(stats[1]) if stats[1] is not None else 0,
+                'total_users': int(stats[2]) if stats[2] is not None else 0,
+                'total_admins': int(stats[3]) if stats[3] is not None else 0
             }
             
         return render_template('admin_dashboard.html', 
@@ -384,10 +476,8 @@ def admin_login():
         hashed_password = hash_password(password)
         
         with sqlite3.connect(DATABASE) as con:
-            admin = con.execute(
-                "SELECT * FROM admins WHERE username=? AND password=?",
-                (username, hashed_password)
-            ).fetchone()
+            admin = con.execute("SELECT * FROM admins WHERE username=? AND password=?",
+                (username, hashed_password)).fetchone()
             
             if admin:
                 session['admin'] = username
@@ -410,7 +500,6 @@ def add_product():
     category = request.form.get('category', 'Other').strip()
     stock = request.form.get('stock', '100')
     
-    # Validate inputs
     if not name or not price:
         flash("Product name and price are required", 'error')
         return redirect('/admin_dashboard')
@@ -422,7 +511,6 @@ def add_product():
         flash("Invalid price or stock value", 'error')
         return redirect('/admin_dashboard')
     
-    # Handle file upload
     if 'image' not in request.files:
         flash("No image file selected", 'error')
         return redirect('/admin_dashboard')
@@ -469,7 +557,6 @@ def update_product(product_id):
     category = request.form.get('category', 'Other').strip()
     stock = request.form.get('stock', '100')
     
-    # Validate inputs
     if not name or not price:
         flash("Product name and price are required", 'error')
         return redirect('/admin_dashboard')
@@ -482,7 +569,6 @@ def update_product(product_id):
         return redirect('/admin_dashboard')
     
     with sqlite3.connect(DATABASE) as con:
-        # Handle image update if new file is provided
         if 'image' in request.files and request.files['image'].filename != '':
             file = request.files['image']
             if allowed_file(file.filename):
@@ -491,7 +577,6 @@ def update_product(product_id):
                 file.save(filepath)
                 image_path = f"uploads/products/{filename}"
                 
-                # Delete old image file
                 old_image = con.execute("SELECT image FROM products WHERE id=?", 
                                       (product_id,)).fetchone()
                 if old_image and old_image[0]:
@@ -524,11 +609,9 @@ def delete_product(product_id):
         return redirect('/admin_login')
     
     with sqlite3.connect(DATABASE) as con:
-        # Get image path before deletion
         image_path = con.execute("SELECT image FROM products WHERE id=?", 
                                (product_id,)).fetchone()
         if image_path and image_path[0]:
-            # Delete the image file
             try:
                 os.remove(os.path.join('static', image_path[0]))
             except:
@@ -559,7 +642,6 @@ def update_order_status(order_id):
     flash("Order status updated", 'success')
     return redirect('/admin_dashboard')
 
-# Utility routes
 @app.route('/get_cart_count')
 def get_cart_count():
     if 'user' in session:
