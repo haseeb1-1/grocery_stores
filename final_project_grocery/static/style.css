@@ -466,3 +466,38 @@ tr:hover {
     font-size: 14px;
   }
 }
+/* Add to style.css */
+.status-badge {
+    padding: 5px 10px;
+    border-radius: 15px;
+    font-size: 0.8em;
+    font-weight: 500;
+    color: white;
+}
+
+.status-badge.delivered {
+    background-color: #4CAF50;
+}
+
+.status-badge.processing {
+    background-color: #FFC107;
+    color: #333;
+}
+
+.status-badge.pending {
+    background-color: #2196F3;
+}
+
+.status-badge.cancelled {
+    background-color: #F44336;
+}
+
+/* Animation for order rows */
+tbody tr {
+    transition: all 0.3s ease;
+}
+
+tbody tr:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+}
